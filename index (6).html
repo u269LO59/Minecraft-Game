@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Block World</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #87ceeb;
+      color: white;
+      font: 14px system-ui, sans-serif;
+    }
+    canvas { display: block; }
+    #panel {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      padding: 12px 14px;
+      min-width: 190px;
+      background: #17212ddd;
+      border: 1px solid #ffffff44;
+      border-radius: 8px;
+      line-height: 1.6;
+    }
+    #panel label { display: block; margin-top: 6px; }
+    #panel select, #panel input { width: 100%; }
+    #instructions {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      background: #0008;
+      text-align: center;
+      cursor: pointer;
+    }
+    #instructions > div {
+      padding: 22px 30px;
+      background: #17212dee;
+      border: 1px solid #ffffff55;
+      border-radius: 10px;
+    }
+    #instructions h1 { margin: 0 0 8px; }
+    #instructions p { margin: 5px 0; }
+    #crosshair {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      width: 12px;
+      height: 12px;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+    #crosshair::before, #crosshair::after {
+      content: "";
+      position: absolute;
+      background: white;
+      box-shadow: 0 0 2px #000;
+    }
+    #crosshair::before { width: 12px; height: 2px; top: 5px; }
+    #crosshair::after { width: 2px; height: 12px; left: 5px; }
+  </style>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="panel">
+    <strong>Block World</strong><br />
+    Chunks: <span id="chunkCount">9</span> / 10
+    <label for="distance">Render distance</label>
+    <select id="distance">
+      <option value="0">1 chunk</option>
+      <option value="1" selected>9 chunks</option>
+    </select>
+    <label for="fov">Field of view</label>
+    <input id="fov" type="range" min="60" max="100" value="75" />
+    <small>WASD move · Space jump · Esc unlock</small>
+  </div>
+
+  <div id="crosshair"></div>
+  <div id="instructions">
+    <div>
+      <h1>Block World</h1>
+      <p>Click to play</p>
+      <p>WASD to move · Mouse to look · Space to jump</p>
+      <p>Esc to release the mouse</p>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { PointerLockControls } from "three/addons/controls/PointerLockControls.js";
+
+    const CHUNK_SIZE = 16;
+    const MAX_CHUNKS = 9;
+    const EYE_HEIGHT = 1.65;
+    const WORLD_SEED = 413;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87ceeb);
+    scene.fog = new THREE.Fog(0x87ceeb, 28, 75);
+
+    const camera = new THREE.PerspectiveCamera(
+      75, window.innerWidth / window.innerHeight, 0.1, 100
+    );
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    scene.add(new THREE.HemisphereLight(0xc9e7ff, 0x69543b, 2));
+    const sun = new THREE.DirectionalLight(0xfff1cf, 2.2);
+    sun.position.set(-20, 35, 18);
+    sun.castShadow = true;
+    scene.add(sun);
+
+    const controls = new PointerLockControls(camera, document.body);
+    scene.add(controls.getObject());
+
+    const materials = {
+      grass: new THREE.MeshLambertMaterial({ color: 0x5d9c42 }),
+      dirt:  new THREE.MeshLambertMaterial({ color: 0x79502e }),
+      stone: new THREE.MeshLambertMaterial({ color: 0x777a7b })
+    };
+    const blockGeometry = new THREE.BoxGeometry(1, 1, 1);
+    const worldGroup = new THREE.Group();
+    scene.add(worldGroup);
+
+    const heights = new Map();
+    const keyOf = (x, z) => `${x},${z}`;
+
+    function terrainHeight(x, z) {
+      const value =
+        Math.sin((x + WORLD_SEED) * 0.22) * 0.55 +
+        Math.cos((z - WORLD_SEED) * 0.19) * 0.45 +
+        Math.sin((x + z) * 0.11) * 0.25;
+      return 3 + Math.round(value);
+    }
+
+    function getHeight(x, z) {
+      const bx = Math.floor(x);
+      const bz = Math.floor(z);
+      return heights.get(keyOf(bx, bz)) ?? 3;
+    }
+
+    function clearWorld() {
+      while (worldGroup.children.length) {
+        const child = worldGroup.children.pop();
+        child.dispose?.();
+        worldGroup.remove(child);
+      }
+      heights.clear();
+    }
+
+    function buildWorld(radius) {
+      clearWorld();
+
+      const chunkCount = Math.min((radius * 2 + 1) ** 2, MAX_CHUNKS);
+      document.getElementById("chunkCount").textContent = chunkCount;
+
+      for (let cz = -radius; cz <= radius; cz++) {
+        for (let cx = -radius; cx <= radius; cx++) {
+          const blocks = { grass: [], dirt: [], stone: [] };
+
+          for (let localZ = 0; localZ < CHUNK_SIZE; localZ++) {
+            for (let localX = 0; localX < CHUNK_SIZE; localX++) {
+              const x = cx * CHUNK_SIZE + localX - CHUNK_SIZE / 2;
+              const z = cz * CHUNK_SIZE + localZ - CHUNK_SIZE / 2;
+              const top = terrainHeight(x, z);
+              heights.set(keyOf(x, z), top);
+
+              for (let y = 0; y <= top; y++) {
+                const type = y === top ? "grass" : (y === 0 ? "stone" : "dirt");
+                blocks[type].push([x, y, z]);
+              }
+            }
+          }
+
+          for (const [type, positions] of Object.entries(blocks)) {
+            const mesh = new THREE.InstancedMesh(
+              blockGeometry, materials[type], positions.length
+            );
+            const matrix = new THREE.Matrix4();
+
+            positions.forEach(([x, y, z], i) => {
+              matrix.makeTranslation(x, y, z);
+              mesh.setMatrixAt(i, matrix);
+            });
+
+            mesh.instanceMatrix.needsUpdate = true;
+            mesh.receiveShadow = true;
+            worldGroup.add(mesh);
+          }
+        }
+      }
+
+      const halfWidth = (radius + 0.5) * CHUNK_SIZE;
+      controls.getObject().position.set(
+        0, getHeight(0, 0) + 0.5 + EYE_HEIGHT, 0
+      );
+      worldBounds = halfWidth - 0.6;
+    }
+
+    let worldBounds = 23.4;
+    let verticalVelocity = 0;
+    let onGround = true;
+    const keys = new Set();
+
+    document.addEventListener("keydown", (event) => {
+      keys.add(event.code);
+      if (event.code === "Space") event.preventDefault();
+    });
+    document.addEventListener("keyup", (event) => keys.delete(event.code));
+
+    const overlay = document.getElementById("instructions");
+    overlay.addEventListener("click", () => controls.lock());
+    controls.addEventListener("lock", () => overlay.style.display = "none");
+    controls.addEventListener("unlock", () => overlay.style.display = "grid");
+
+    document.getElementById("distance").addEventListener("change", (event) => {
+      buildWorld(Number(event.target.value));
+    });
+    document.getElementById("fov").addEventListener("input", (event) => {
+      camera.fov = Number(event.target.value);
+      camera.updateProjectionMatrix();
+    });
+
+    const clock = new THREE.Clock();
+    const direction = new THREE.Vector3();
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const delta = Math.min(clock.getDelta(), 0.05);
+
+      if (controls.isLocked) {
+        const moveSpeed = 5.5;
+        let forward = 0;
+        let sideways = 0;
+
+        if (keys.has("KeyW")) forward += 1;
+        if (keys.has("KeyS")) forward -= 1;
+        if (keys.has("KeyD")) sideways += 1;
+        if (keys.has("KeyA")) sideways -= 1;
+
+        if (forward || sideways) {
+          direction.set(sideways, 0, -forward).normalize();
+          direction.applyQuaternion(controls.getObject().quaternion);
+          controls.getObject().position.addScaledVector(
+            direction, moveSpeed * delta
+          );
+        }
+
+        const player = controls.getObject();
+        player.position.x = THREE.MathUtils.clamp(
+          player.position.x, -worldBounds, worldBounds
+        );
+        player.position.z = THREE.MathUtils.clamp(
+          player.position.z, -worldBounds, worldBounds
+        );
+
+        verticalVelocity -= 18 * delta;
+        if (keys.has("Space") && onGround) {
+          verticalVelocity = 7;
+          onGround = false;
+        }
+        player.position.y += verticalVelocity * delta;
+
+        const floor = getHeight(player.position.x, player.position.z)
+          + 0.5 + EYE_HEIGHT;
+        if (player.position.y <= floor) {
+          player.position.y = floor;
+          verticalVelocity = 0;
+          onGround = true;
+        }
+      }
+
+      renderer.render(scene, camera);
+    }
+
+    buildWorld(1);
+    animate();
+
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
